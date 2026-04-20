@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+#
+# ==============================================================================
+# UPS Diagnostic Tool (,upscheck)
+# ==============================================================================
+# Changelog:
+# v1.0.0 - Initial release: Systemd, port binding, and upsc local read checks.
+# v1.1.0 - Added ANSI stripping, prepending log functionality, and -l flag.
+# v1.2.0 - Added -O/--output_log flag, enhanced help menu, and implied logging.
+# ==============================================================================
+
 import subprocess
 import socket
 import sys
@@ -15,7 +25,7 @@ YELLOW = '\033[93m'
 RESET = '\033[0m'
 BOLD = '\033[1m'
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 # Global buffer to capture output for logging
 output_buffer = io.StringIO()
@@ -121,9 +131,9 @@ def check_upsc():
             cprint(f"    -> [{RED}?{RESET}] Could not read status variables for {dev}.")
             cprint(f"       Error Output: {err_stat}")
 
-def write_log():
+def write_log(target_dir):
     """Prepends the captured run data to today's log file."""
-    log_dir = os.path.expanduser("~/.logs/upscheck/")
+    log_dir = os.path.expanduser(target_dir)
     os.makedirs(log_dir, exist_ok=True)
     
     date_str = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -148,9 +158,28 @@ def main():
     # Always print version first
     cprint(f"{BOLD}UPS Diagnostic Tool v{VERSION}{RESET}\n")
     
-    parser = argparse.ArgumentParser(description="Diagnostic tool for checking NUT UPS services.")
-    parser.add_argument("-l", "--log", action="store_true", help="Enable and prepend logging to ~/.logs/upscheck/")
+    parser = argparse.ArgumentParser(
+        description="Diagnostic tool for checking NUT UPS services, systemd health, and daemon communication.",
+        epilog="Examples:\n"
+               "  ./,upscheck                 (Run diagnostics without logging)\n"
+               "  ./,upscheck -l              (Run and prepend log to ~/.logs/upscheck/)\n"
+               "  ./,upscheck -O /tmp/logs    (Run and prepend log to custom /tmp/logs/ dir)",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    
+    parser.add_argument("-l", "--log", action="store_true", help="Enable and prepend logging to default directory (~/.logs/upscheck/)")
+    parser.add_argument("-O", "--output_log", metavar="DIR", type=str, help="Specify a custom directory to place the log file (implies -l)")
     args = parser.parse_args()
+
+    # Determine logging status and directory
+    logging_enabled = False
+    log_dir = "~/.logs/upscheck/"
+    
+    if args.output_log:
+        logging_enabled = True
+        log_dir = args.output_log
+    elif args.log:
+        logging_enabled = True
 
     print_header("Systemd Service Health")
     services = [
@@ -170,8 +199,8 @@ def main():
     check_upsc()
     cprint("")
 
-    if args.log:
-        write_log()
+    if logging_enabled:
+        write_log(log_dir)
 
 if __name__ == "__main__":
     main()
