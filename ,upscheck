@@ -2,6 +2,11 @@
 import subprocess
 import socket
 import sys
+import os
+import datetime
+import argparse
+import io
+import re
 
 # Terminal Colors
 GREEN = '\033[92m'
@@ -10,10 +15,29 @@ YELLOW = '\033[93m'
 RESET = '\033[0m'
 BOLD = '\033[1m'
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+
+# Global buffer to capture output for logging
+output_buffer = io.StringIO()
+
+def strip_ansi(text):
+    """Removes ANSI escape codes from a string."""
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', text)
+
+def cprint(text="", end="\n"):
+    """Custom print that writes to buffer and handles tty colors gracefully."""
+    # Write cleanly to stdout (stripping colors if user manually pipes the output)
+    if not sys.stdout.isatty():
+        print(strip_ansi(text), end=end)
+    else:
+        print(text, end=end)
+    
+    # Always write raw text to buffer; we will strip ANSI right before saving to log
+    output_buffer.write(text + end)
 
 def print_header(text):
-    print(f"\n{BOLD}=== {text} ==={RESET}")
+    cprint(f"\n{BOLD}=== {text} ==={RESET}")
 
 def run_cmd(cmd):
     """Executes a shell command and returns return code, stdout, and stderr."""
@@ -27,19 +51,19 @@ def check_service(service_name):
     """Checks systemd status and prints logs if failed."""
     code, stdout, stderr = run_cmd(["systemctl", "is-active", service_name])
     if stdout == "active":
-        print(f"[{GREEN}?{RESET}] {service_name} is running.")
+        cprint(f"[{GREEN}?{RESET}] {service_name} is running.")
         return True
     else:
-        print(f"[{RED}?{RESET}] {service_name} is NOT active (Status: {stdout}).")
-        print(f"{YELLOW}Fetching recent logs for {service_name}...{RESET}")
+        cprint(f"[{RED}?{RESET}] {service_name} is NOT active (Status: {stdout}).")
+        cprint(f"{YELLOW}Fetching recent logs for {service_name}...{RESET}")
         
         # Grab the last 15 log lines
         log_code, log_out, log_err = run_cmd(["journalctl", "-u", service_name, "-n", "15", "--no-pager"])
         if log_out:
             for line in log_out.split('\n'):
-                print(f"    {line}")
+                cprint(f"    {line}")
         else:
-            print("    (No logs found in journalctl)")
+            cprint("    (No logs found in journalctl)")
         return False
 
 def check_failed_drivers():
@@ -49,17 +73,17 @@ def check_failed_drivers():
     failed_drivers = [line.strip() for line in lines if "nut-driver" in line and "failed" in line]
     
     if failed_drivers:
-        print(f"\n[{RED}?{RESET}] Found failed UPS driver instances!")
+        cprint(f"\n[{RED}?{RESET}] Found failed UPS driver instances!")
         for driver in failed_drivers:
             # Extract just the service name from the systemctl output row
             svc_name = driver.split()[0]
-            print(f"{YELLOW}Fetching logs for crashed driver: {svc_name}...{RESET}")
+            cprint(f"{YELLOW}Fetching logs for crashed driver: {svc_name}...{RESET}")
             log_code, log_out, log_err = run_cmd(["journalctl", "-u", svc_name, "-n", "15", "--no-pager"])
             if log_out:
                 for line in log_out.split('\n'):
-                    print(f"    {line}")
+                    cprint(f"    {line}")
     else:
-        print(f"[{GREEN}?{RESET}] No crashed hardware driver instances found.")
+        cprint(f"[{GREEN}?{RESET}] No crashed hardware driver instances found.")
 
 def check_port(host="127.0.0.1", port=3493):
     """Checks if the upsd socket is accepting connections."""
@@ -67,10 +91,10 @@ def check_port(host="127.0.0.1", port=3493):
         s.settimeout(2)
         try:
             s.connect((host, port))
-            print(f"[{GREEN}?{RESET}] upsd is actively listening on {host}:{port}.")
+            cprint(f"[{GREEN}?{RESET}] upsd is actively listening on {host}:{port}.")
             return True
         except Exception as e:
-            print(f"[{RED}?{RESET}] Connection failed on {host}:{port} - {e}")
+            cprint(f"[{RED}?{RESET}] Connection failed on {host}:{port} - {e}")
             return False
 
 def check_upsc():
@@ -79,27 +103,55 @@ def check_upsc():
     code, stdout, stderr = run_cmd(["upsc", "-l"])
     
     if code != 0:
-        print(f"[{RED}?{RESET}] Failed to list UPS devices via upsc.")
-        print(f"    Error Output: {stderr}")
+        cprint(f"[{RED}?{RESET}] Failed to list UPS devices via upsc.")
+        cprint(f"    Error Output: {stderr}")
         return
 
     devices = [d for d in stdout.split('\n') if d]
     if not devices:
-        print(f"[{YELLOW}!{RESET}] Daemon responded, but no UPS devices are configured/detected.")
+        cprint(f"[{YELLOW}!{RESET}] Daemon responded, but no UPS devices are configured/detected.")
         return
 
     for dev in devices:
-        print(f"[{GREEN}?{RESET}] Found UPS device registered: {BOLD}{dev}{RESET}")
+        cprint(f"[{GREEN}?{RESET}] Found UPS device registered: {BOLD}{dev}{RESET}")
         code_stat, out_stat, err_stat = run_cmd(["upsc", dev, "ups.status"])
         if code_stat == 0:
-            print(f"    -> Current UPS Status: {BOLD}{GREEN}{out_stat}{RESET}")
+            cprint(f"    -> Current UPS Status: {BOLD}{GREEN}{out_stat}{RESET}")
         else:
-            print(f"    -> [{RED}?{RESET}] Could not read status variables for {dev}.")
-            print(f"       Error Output: {err_stat}")
+            cprint(f"    -> [{RED}?{RESET}] Could not read status variables for {dev}.")
+            cprint(f"       Error Output: {err_stat}")
+
+def write_log():
+    """Prepends the captured run data to today's log file."""
+    log_dir = os.path.expanduser("~/.logs/upscheck/")
+    os.makedirs(log_dir, exist_ok=True)
+    
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_file = os.path.join(log_dir, f"upscheck_{date_str}.log")
+    
+    new_content = strip_ansi(output_buffer.getvalue())
+    header = f"--- Run at {time_str} ---\n"
+    
+    existing_content = ""
+    if os.path.exists(log_file):
+        with open(log_file, "r") as f:
+            existing_content = f.read()
+            
+    with open(log_file, "w") as f:
+        f.write(header + new_content + "\n" + existing_content)
+        
+    # Print to console normally (not the buffer) to confirm log was written
+    print(f"\n[{GREEN}?{RESET}] Log successfully prepended to {log_file}")
 
 def main():
-    print(f"{BOLD}UPS Diagnostic Tool v{VERSION}{RESET}\n")
+    # Always print version first
+    cprint(f"{BOLD}UPS Diagnostic Tool v{VERSION}{RESET}\n")
     
+    parser = argparse.ArgumentParser(description="Diagnostic tool for checking NUT UPS services.")
+    parser.add_argument("-l", "--log", action="store_true", help="Enable and prepend logging to ~/.logs/upscheck/")
+    args = parser.parse_args()
+
     print_header("Systemd Service Health")
     services = [
         "nut-server.service",
@@ -113,11 +165,13 @@ def main():
     check_failed_drivers()
 
     print_header("Network & Port Binding")
-    # Check localhost (where local upsmon connects)
     check_port("127.0.0.1", 3493)
     
     check_upsc()
-    print("")
+    cprint("")
+
+    if args.log:
+        write_log()
 
 if __name__ == "__main__":
     main()
